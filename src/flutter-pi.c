@@ -41,7 +41,7 @@
 #include <GLES2/gl2ext.h>
 #include <libinput.h>
 #include <libudev.h>
-#include <systemd/sd-event.h>
+#include <uev/uev.h>
 #include <flutter_embedder.h>
 
 #include <flutter-pi.h>
@@ -486,36 +486,11 @@ static FlutterTransformation on_get_transformation(void *userdata) {
     return flutterpi.view.view_to_display_transform;
 }
 
-atomic_int_least64_t platform_task_counter = 0;
-
-/// platform tasks
-static int on_execute_platform_task(
-    sd_event_source *s,
-    void *userdata
-) {
-    struct platform_task *task;
-    int ok;
-
-    task = userdata;
-    ok = task->callback(task->userdata);
-    if (ok != 0) {
-        LOG_ERROR("Error executing platform task: %s\n", strerror(ok));
-    }
-
-    free(task);
-
-    sd_event_source_set_enabled(s, SD_EVENT_OFF);
-    sd_event_source_unrefp(&s);
-
-    return 0;
-}
-
 int flutterpi_post_platform_task(
     int (*callback)(void *userdata),
     void *userdata
 ) {
     struct platform_task *task;
-    sd_event_source *src;
     int ok;
 
     task = malloc(sizeof *task);
@@ -526,59 +501,22 @@ int flutterpi_post_platform_task(
     task->callback = callback;
     task->userdata = userdata;
 
-    if (pthread_self() != flutterpi.event_loop_thread) {
-        pthread_mutex_lock(&flutterpi.event_loop_mutex);
+    ok = task->callback(task->userdata);
+    if (ok != 0) {
+        LOG_ERROR("Error executing platform task: %s\n", strerror(ok));
     }
 
-    ok = sd_event_add_defer(
-        flutterpi.event_loop,
-        &src,
-        on_execute_platform_task,
-        task
-    );
-    if (ok < 0) {
-        LOG_ERROR("Error posting platform task to main loop. sd_event_add_defer: %s\n", strerror(-ok));
-        ok = -ok;
-        goto fail_unlock_event_loop;
-    }
-
-    // Higher values mean lower priority. So later platform tasks are handled later too.
-    sd_event_source_set_priority(src, atomic_fetch_add(&platform_task_counter, 1));
-
-    if (pthread_self() != flutterpi.event_loop_thread) {
-        ok = write(flutterpi.wakeup_event_loop_fd, (uint8_t[8]) {0, 0, 0, 0, 0, 0, 0, 1}, 8);
-        if (ok < 0) {
-            perror("[flutter-pi] Error arming main loop for platform task. write");
-            ok = errno;
-            goto fail_unlock_event_loop;
-        }
-    }
-
-    if (pthread_self() != flutterpi.event_loop_thread) {
-        pthread_mutex_unlock(&flutterpi.event_loop_mutex);
-    }
-
-    return 0;
-
-
-    fail_unlock_event_loop:
-    if (pthread_self() != flutterpi.event_loop_thread) {
-        pthread_mutex_unlock(&flutterpi.event_loop_mutex);
-    }
+    free(task);
 
     return ok;
 }
 
 /// timed platform tasks
-static int on_execute_platform_task_with_time(
-    sd_event_source *s,
-    uint64_t usec,
-    void *userdata
-) {
+static void on_execute_platform_task_with_time(uev_t *w, void *userdata, int events) {
     struct platform_task *task;
     int ok;
 
-    (void) usec;
+    (void) events;
 
     task = userdata;
     ok = task->callback(task->userdata);
@@ -587,11 +525,8 @@ static int on_execute_platform_task_with_time(
     }
 
     free(task);
-
-    sd_event_source_set_enabled(s, SD_EVENT_OFF);
-    sd_event_source_unrefp(&s);
-
-    return 0;
+    uev_timer_stop(w);
+    free(w);
 }
 
 int flutterpi_post_platform_task_with_time(
@@ -600,7 +535,7 @@ int flutterpi_post_platform_task_with_time(
     uint64_t target_time_usec
 ) {
     struct platform_task *task;
-    //sd_event_source *source;
+    uev_t *watcher = malloc(sizeof(uev_t));
     int ok;
 
     task = malloc(sizeof *task);
@@ -615,18 +550,22 @@ int flutterpi_post_platform_task_with_time(
         pthread_mutex_lock(&flutterpi.event_loop_mutex);
     }
 
-    ok = sd_event_add_time(
+    // Convert the absolute timestamp to a relative timestamp in milliseconds
+    int now_ms = flutterpi.flutter.libflutter_engine.FlutterEngineGetCurrentTime()/1000000;
+    int target_ms = target_time_usec/1000000;
+    int target_timestamp = target_ms - now_ms;
+
+    ok = uev_timer_init(
         flutterpi.event_loop,
-        NULL,
-        CLOCK_MONOTONIC,
-        target_time_usec,
-        1,
+        watcher,
         on_execute_platform_task_with_time,
-        task
-    );
+        task,
+        target_timestamp,
+        0);
+
     if (ok < 0) {
-        LOG_ERROR("Error posting platform task to main loop. sd_event_add_time: %s\n", strerror(-ok));
-        ok = -ok;
+        LOG_ERROR("Error posting platform task to main loop. uev_timer_init: %i\n", errno);
+        ok = errno;
         goto fail_unlock_event_loop;
     }
 
@@ -645,7 +584,6 @@ int flutterpi_post_platform_task_with_time(
 
     return 0;
 
-
     fail_unlock_event_loop:
     if (pthread_self() != flutterpi.event_loop_thread) {
         pthread_mutex_unlock(&flutterpi.event_loop_mutex);
@@ -655,10 +593,10 @@ int flutterpi_post_platform_task_with_time(
 }
 
 int flutterpi_sd_event_add_io(
-    sd_event_source **source_out,
+    uev_t **source_out,
     int fd,
     uint32_t events,
-    sd_event_io_handler_t callback,
+    uev_cb_t callback,
     void *userdata
 ) {
     int ok;
@@ -667,17 +605,18 @@ int flutterpi_sd_event_add_io(
         pthread_mutex_lock(&flutterpi.event_loop_mutex);
     }
 
-    ok = sd_event_add_io(
+    ok = uev_io_init(
         flutterpi.event_loop,
-        source_out,
-        fd,
-        events,
-        callback,
-        userdata
+        *source_out,
+        callback, 
+        userdata, 
+        fd, 
+        events
     );
+
     if (ok < 0) {
-        LOG_ERROR("Could not add IO callback to event loop. sd_event_add_io: %s\n", strerror(-ok));
-        return -ok;
+        LOG_ERROR("Could not add IO callback to event loop. uev_io_init: %i\n", errno);
+        return errno;
     }
 
     if (pthread_self() != flutterpi.event_loop_thread) {
@@ -744,7 +683,7 @@ static void on_post_flutter_task(
     ok = flutterpi_post_platform_task_with_time(
         on_execute_flutter_task,
         dup_task,
-        target_time / 1000
+        target_time
     );
     if (ok != 0) {
         free(dup_task);
@@ -957,7 +896,7 @@ EGLContext flutterpi_create_egl_context(struct flutterpi *flutterpi) {
         }
     );
     if (context == EGL_NO_CONTEXT) {
-        LOG_ERROR("Could not create new EGL context from temp context. eglCreateContext: %" PRId32 "\n", eglGetError());
+        LOG_ERROR("Could not create new EGL context from temp context. eglCreateContext: %i\n", eglGetError());
         goto fail_unlock_mutex;
     }
 
@@ -988,107 +927,24 @@ static bool runs_platform_tasks_on_current_thread(void* userdata) {
 }
 
 static int run_main_loop(void) {
-    int ok, evloop_fd;
-
-    pthread_mutex_lock(&flutterpi.event_loop_mutex);
-    ok = sd_event_get_fd(flutterpi.event_loop);
-    if (ok < 0) {
-        LOG_ERROR("Could not get fd for main event loop. sd_event_get_fd: %s\n", strerror(-ok));
-        pthread_mutex_unlock(&flutterpi.event_loop_mutex);
-        return -ok;
-    }
-    pthread_mutex_unlock(&flutterpi.event_loop_mutex);
-
-    evloop_fd = ok;
-
-    {
-        fd_set rfds, wfds, xfds;
-        int state;
-        FD_ZERO(&rfds);
-        FD_ZERO(&wfds);
-        FD_ZERO(&xfds);
-        FD_SET(evloop_fd, &rfds);
-        FD_SET(evloop_fd, &wfds);
-        FD_SET(evloop_fd, &xfds);
-
-        const fd_set const_fds = rfds;
-
-        pthread_mutex_lock(&flutterpi.event_loop_mutex);
-         
-        do {
-            state = sd_event_get_state(flutterpi.event_loop);
-            switch (state) {
-                case SD_EVENT_INITIAL:
-                    ok = sd_event_prepare(flutterpi.event_loop);
-                    if (ok < 0) {
-                        LOG_ERROR("Could not prepare event loop. sd_event_prepare: %s\n", strerror(-ok));
-                        return -ok;
-                    }
-
-                    break;
-                case SD_EVENT_ARMED:
-                    pthread_mutex_unlock(&flutterpi.event_loop_mutex);
-
-                    do {
-                        rfds = const_fds;
-                        wfds = const_fds;
-                        xfds = const_fds;
-                        ok = select(evloop_fd + 1, &rfds, &wfds, &xfds, NULL);
-                        if ((ok < 0) && (errno != EINTR)) {
-                            perror("[flutter-pi] Could not wait for event loop events. select");
-                            return errno;
-                        }
-                    } while ((ok < 0) && (errno == EINTR));
-
-                    pthread_mutex_lock(&flutterpi.event_loop_mutex);
-                        
-                    ok = sd_event_wait(flutterpi.event_loop, 0);
-                    if (ok < 0) {
-                        LOG_ERROR("Could not check for event loop events. sd_event_wait: %s\n", strerror(-ok));
-                        return -ok;
-                    }
-
-                    break;
-                case SD_EVENT_PENDING:
-                    ok = sd_event_dispatch(flutterpi.event_loop);
-                    if (ok < 0) {
-                        LOG_ERROR("Could not dispatch event loop events. sd_event_dispatch: %s\n", strerror(-ok));
-                        return -ok;
-                    }
-
-                    break;
-                case SD_EVENT_FINISHED:
-                    break;
-                default:
-                    LOG_ERROR("Unhandled event loop state: %d. Aborting\n", state);
-                    abort();
-            }
-        } while (state != SD_EVENT_FINISHED);
-
-        pthread_mutex_unlock(&flutterpi.event_loop_mutex);
-    }
+    uev_run(flutterpi.event_loop, 0);
 
     pthread_mutex_destroy(&flutterpi.event_loop_mutex);
-    sd_event_unrefp(&flutterpi.event_loop);
 
     return 0;
 }
 
-static int on_wakeup_main_loop(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
+static void on_wakeup_main_loop(uev_t *w, void *userdata, int events) {
     uint8_t buffer[8];
     int ok;
 
-    (void) s;
-    (void) revents;
+    (void) events;
     (void) userdata;
 
-    ok = read(fd, buffer, 8);
+    ok = read(w->fd, buffer, 8);
     if (ok < 0) {
-        perror("[flutter-pi] Could not read mainloop wakeup userdata. read");
-        return errno;
+        perror("[flutter-pi] Could not read mainloop wakeup userdata.");
     }
-
-    return 0;
 }
 
 static int init_main_loop(void) {
@@ -1102,23 +958,26 @@ static int init_main_loop(void) {
         return errno;
     }
 
-    ok = sd_event_new(&flutterpi.event_loop);
+    flutterpi.event_loop = malloc(sizeof(uev_ctx_t));
+    ok = uev_init(flutterpi.event_loop);
     if (ok < 0) {
-        LOG_ERROR("Could not create main event loop. sd_event_new: %s\n", strerror(-ok));
+        LOG_ERROR("Could not create main event loop. uev_init: %i\n", ok);
         return -ok;
     }
 
-    ok = sd_event_add_io(
+    uev_t* wakeup = malloc(sizeof(uev_t));
+
+    ok = uev_io_init(
         flutterpi.event_loop,
+        wakeup,
+        on_wakeup_main_loop,
         NULL,
         wakeup_fd,
-        EPOLLIN,
-        on_wakeup_main_loop,
-        NULL
+        UEV_READ
     );
+
     if (ok < 0) {
-        LOG_ERROR("Error adding wakeup callback to main loop. sd_event_add_io: %s\n", strerror(-ok));
-        sd_event_unrefp(&flutterpi.event_loop);
+        LOG_ERROR("Error adding wakeup callback to main loop. uev_io_init: %i\n", ok);
         close(wakeup_fd);
         return -ok;
     }
@@ -1200,20 +1059,16 @@ void on_pageflip_event(
     cqueue_unlock(&flutterpi.frame_queue);
 }
 
-static int on_drm_fd_ready(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
+static void on_drm_fd_ready(uev_t *w, void *userdata, int events) {
     int ok;
 
-    (void) s;
-    (void) revents;
+    (void) events;
     (void) userdata;
 
-    ok = drmHandleEvent(fd, &flutterpi.drm.evctx);
+    ok = drmHandleEvent(w->fd, &flutterpi.drm.evctx);
     if (ok < 0) {
         perror("[flutter-pi] Could not handle DRM event. drmHandleEvent");
-        return -errno;
     }
-
-    return 0;
 }
 
 int flutterpi_fill_view_properties(
@@ -1550,16 +1405,20 @@ static int init_display(void) {
     flutterpi.drm.evctx.version = 4;
     flutterpi.drm.evctx.page_flip_handler = on_pageflip_event;
 
-    ok = sd_event_add_io(
+    uev_t *drm_pageflip_event_source = malloc(sizeof(uev_t));
+
+    ok = uev_io_init(
         flutterpi.event_loop,
-        &flutterpi.drm.drm_pageflip_event_source,
-        flutterpi.drm.drmdev->fd,
-        EPOLLIN | EPOLLHUP | EPOLLPRI,
+        drm_pageflip_event_source,
         on_drm_fd_ready,
-        NULL
-    );
+        NULL,
+        flutterpi.drm.drmdev->fd,
+        UEV_READ);
+
+    flutterpi.drm.drm_pageflip_event_source = drm_pageflip_event_source;
+
     if (ok < 0) {
-        LOG_ERROR("Could not add DRM pageflip event listener. sd_event_add_io: %s\n", strerror(-ok));
+        LOG_ERROR("Could not add DRM pageflip event listener. uev_io_init: %i\n", errno);
         return -ok;
     }
 
@@ -2061,9 +1920,9 @@ int flutterpi_schedule_exit(void) {
         pthread_mutex_lock(&flutterpi.event_loop_mutex);
     }
     
-    ok = sd_event_exit(flutterpi.event_loop, 0);
+    ok = uev_exit(flutterpi.event_loop);
     if (ok < 0) {
-        LOG_ERROR("Could not schedule application exit. sd_event_exit: %s\n", strerror(-ok));
+        LOG_ERROR("Could not schedule application exit. uev_exit: %i\n", errno);
         if (pthread_self() != flutterpi.event_loop_thread) {
             pthread_mutex_unlock(&flutterpi.event_loop_mutex);
         }
@@ -2198,24 +2057,21 @@ static const struct user_input_interface user_input_interface = {
     .on_move_cursor = on_move_cursor
 };
 
-static int on_user_input_fd_ready(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
+static void on_user_input_fd_ready(uev_t *w, void *userdata, int events) {
     struct user_input *input;
     
-    (void) s;
-    (void) fd;
-    (void) revents;
+    (void) w;
+    (void) events;
 
     input = userdata;
 
-    return user_input_on_fd_ready(input);
+    user_input_on_fd_ready(input);
 }
 
 static int init_user_input(void) {
     struct user_input *input;
-    sd_event_source *event_source;
+    uev_t* user_input_event_source = malloc(sizeof(uev_t));
     int ok;
-    
-    event_source = NULL;
     
     input = user_input_new(
         &user_input_interface,
@@ -2228,23 +2084,25 @@ static int init_user_input(void) {
     if (input == NULL) {
         LOG_ERROR("Couldn't initialize user input. flutter-pi will run without user input.\n");
     } else {
-        ok = sd_event_add_io(
+        int input_fd = user_input_get_fd(input);
+
+        ok = uev_io_init(
             flutterpi.event_loop,
-            &event_source,
-            user_input_get_fd(input),
-            EPOLLIN | EPOLLRDHUP | EPOLLPRI,
+            user_input_event_source,
             on_user_input_fd_ready,
-            input
-        );
+            input,
+            input_fd,
+            UEV_READ);
+
         if (ok < 0) {
-            LOG_ERROR("Couldn't listen for user input. flutter-pi will run without user input. sd_event_add_io: %s\n", strerror(-ok));
+            LOG_ERROR("Couldn't listen for user input. flutter-pi will run without user input. sd_event_add_io: %i\n", errno);
             user_input_destroy(input);
             input = NULL;
         }
     }
     
     flutterpi.user_input = input;
-    flutterpi.user_input_event_source = event_source;
+    flutterpi.user_input_event_source = user_input_event_source;
 
     return 0;
 }

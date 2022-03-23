@@ -186,7 +186,7 @@ static int create_drm_rbo(
 		EGL_NONE
 	});
 	if ((egl_error = eglGetError()) != EGL_SUCCESS) {
-		LOG_ERROR("error creating DRM EGL Image for flutter backing store, eglCreateDRMImageMESA: %" PRId32 "\n", egl_error);
+		LOG_ERROR("error creating DRM EGL Image for flutter backing store, eglCreateDRMImageMESA: %i\n", egl_error);
 		return EINVAL;
 	}
 

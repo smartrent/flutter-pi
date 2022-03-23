@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <sys/eventfd.h>
+#include <uev/uev.h>
 
 #include <drm_fourcc.h>
 #include <gst/gst.h>
@@ -910,7 +911,7 @@ static int init(struct gstplayer *player, bool force_sw_decoders) {
     flutterpi_sd_event_add_io(
         &busfd_event_source,
         fd.fd,
-        EPOLLIN,
+        UEV_READ,
         on_bus_fd_ready,
         player
     );

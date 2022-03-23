@@ -17,7 +17,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <libinput.h>
-#include <systemd/sd-event.h>
+#include <uev/uev.h>
 #include <EGL/egl.h>
 //#define  EGL_EGLEXT_PROTOTYPES
 #include <EGL/eglext.h>
@@ -226,7 +226,7 @@ struct flutterpi {
 	struct {
 		struct drmdev *drmdev;
 		drmEventContext evctx;
-		sd_event_source *drm_pageflip_event_source;
+		uev_t *drm_pageflip_event_source;
 		bool platform_supports_get_sequence_ioctl;
 	} drm;
 
@@ -328,7 +328,7 @@ struct flutterpi {
 	struct compositor *compositor;
 
 	/// IO
-	sd_event_source *user_input_event_source;
+	uev_t *user_input_event_source;
 	struct user_input *user_input;
 
 	/// Locales
@@ -355,7 +355,7 @@ struct flutterpi {
 	/// main event loop
 	pthread_t event_loop_thread;
 	pthread_mutex_t event_loop_mutex;
-	sd_event *event_loop;
+	uev_ctx_t* event_loop;
 	int wakeup_event_loop_fd;
 
 	/// flutter-pi internal stuff
@@ -402,10 +402,10 @@ int flutterpi_post_platform_task_with_time(
 );
 
 int flutterpi_sd_event_add_io(
-	sd_event_source **source_out,
+	uev_t **source_out,
 	int fd,
 	uint32_t events,
-	sd_event_io_handler_t callback,
+	uev_cb_t callback,
 	void *userdata
 );
 
