@@ -8,7 +8,6 @@
 #include <math.h>
 
 #include <linux/input-event-codes.h>
-#include <systemd/sd-event.h>
 #include <libinput.h>
 
 #include <flutter-pi.h>
