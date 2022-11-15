@@ -1795,7 +1795,7 @@ static int init_application(void) {
         .root_isolate_create_callback = NULL,
         .update_semantics_node_callback = NULL,
         .update_semantics_custom_action_callback = NULL,
-        .persistent_cache_path = NULL,
+        .persistent_cache_path = getenv("FLUTTER_CACHE_PATH"),
         .is_persistent_cache_read_only = false,
         .vsync_callback = NULL /* on_frame_request - broken since 2.2 */,
         .custom_dart_entrypoint = NULL,
