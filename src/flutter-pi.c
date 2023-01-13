@@ -551,20 +551,18 @@ int flutterpi_post_platform_task_with_time(
     }
 
     // Convert the absolute timestamp to a relative timestamp in milliseconds
-    int now_ms = flutterpi.flutter.libflutter_engine.FlutterEngineGetCurrentTime()/1000000;
-    int target_ms = target_time_usec/1000000;
-    int target_timestamp = target_ms - now_ms;
+    int time_sec = target_time_usec / 1000000;
 
-    ok = uev_timer_init(
+    ok = uev_cron_init(
         flutterpi.event_loop,
         watcher,
         on_execute_platform_task_with_time,
         task,
-        target_timestamp,
+        time_sec,
         0);
 
     if (ok < 0) {
-        LOG_ERROR("Error posting platform task to main loop. uev_timer_init: %i\n", errno);
+        perror("Error posting platform task to main loop. uev_timer_init: ");
         ok = errno;
         goto fail_unlock_event_loop;
     }
