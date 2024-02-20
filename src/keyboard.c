@@ -81,7 +81,7 @@ static char *get_value_allocated(const char *varname, const char *buffer) {
 
     match_length = match.rm_eo - match.rm_so;
 
-    allocated = malloc(match_length + 1);
+    allocated = calloc(1, match_length + 1);
     if (allocated == NULL) {
         errno = ENOMEM;
         return NULL;

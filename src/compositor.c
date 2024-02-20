@@ -1564,7 +1564,7 @@ static bool on_present_layers(
 	if (schedule_fake_page_flip_event) {
 		uint64_t time = flutterpi.flutter.libflutter_engine.FlutterEngineGetCurrentTime();
 
-		struct simulated_page_flip_event_data *data = malloc(sizeof(struct simulated_page_flip_event_data));
+		struct simulated_page_flip_event_data *data = calloc(1, sizeof(struct simulated_page_flip_event_data));
 		if (data == NULL) {
 			return false;
 		}
