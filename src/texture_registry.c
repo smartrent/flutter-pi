@@ -53,7 +53,7 @@ struct texture_registry *texture_registry_new(
     struct texture_registry *reg;
     int ok;
 
-    reg = malloc(sizeof *reg);
+    reg = calloc(1, sizeof *reg);
     if (reg == NULL) {
         return NULL;
     }

@@ -106,7 +106,7 @@ struct user_input *user_input_new(
 	struct udev *udev;
 	int ok;
 
-	input = malloc(sizeof *input);
+	input = calloc(1, sizeof *input);
 	if (input == NULL) {
 		goto fail_return_null;
 	}
