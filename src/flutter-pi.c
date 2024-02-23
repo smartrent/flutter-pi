@@ -532,7 +532,7 @@ static void on_execute_platform_task_with_time(uev_t *w, void *userdata, int eve
 int flutterpi_post_platform_task_with_time(
     int (*callback)(void *userdata),
     void *userdata,
-    uint64_t target_time_usec
+    uint64_t target_time_ns
 ) {
     struct platform_task *task;
     uev_t *watcher = calloc(1, sizeof(uev_t));
@@ -551,18 +551,28 @@ int flutterpi_post_platform_task_with_time(
     }
 
     // Convert the absolute timestamp to a relative timestamp in milliseconds
-    int now_ms = flutterpi.flutter.libflutter_engine.FlutterEngineGetCurrentTime()/1000000;
-    int target_ms = target_time_usec/1000000;
-    int target_timestamp_ms = target_ms - now_ms;
-    if (target_timestamp_ms < 1)
-        target_timestamp_ms = 1;
+    uint64_t now_ns = flutterpi.flutter.libflutter_engine.FlutterEngineGetCurrentTime();
+    uint64_t delay_ns = target_time_ns - now_ns;
+    int delay_ms;
+
+#define MAX_ALLOWED_TIMEOUT_NS (0x7fffffffULL * 1000000ULL) // Max signed 32-bit in milliseconds
+
+    // Check whether the timeout is in range (1 ms to ~24 days).
+    if (delay_ns >= 1000000ULL && delay_ns < MAX_ALLOWED_TIMEOUT_NS) {
+        // Convert and round to the nearest millisecond.
+        delay_ms = (int) ((delay_ns + 500000) / 1000000);
+    } else {
+        // The timeout is either too small or has passed (overflow), so call
+        // with the minimum timeout to uev_timer_int.
+        delay_ms = 1;
+    }
 
     ok = uev_timer_init(
         flutterpi.event_loop,
         watcher,
         on_execute_platform_task_with_time,
         task,
-        target_timestamp_ms,
+        delay_ms,
         0);
 
     if (ok < 0) {
